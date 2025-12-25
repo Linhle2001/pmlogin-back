@@ -45,6 +45,13 @@ security = HTTPBearer()
 # proxy_service = ProxyService()
 # profile_service = ProfileService()
 
+# Helper functions to get services
+def get_proxy_service():
+    return ProxyService()
+
+def get_profile_service(db: Session):
+    return ProfileService(db)
+
 # Initialize database on startup
 @app.on_event("startup")
 async def startup_event():
@@ -76,115 +83,92 @@ async def get_current_user(
 # Auth endpoints
 @app.post("/login", response_model=TokenResponse)
 async def login(user_data: UserLogin, db: Session = Depends(get_db)):
-    """Login endpoint - tries original server first, falls back to demo"""
+    """Login endpoint - authenticates with local database"""
     
-    # Try original server first
     try:
-        auth_result = await original_server.authenticate_user(
-            user_data.email, 
-            user_data.password, 
-            user_data.hwid
-        )
-        
-        if auth_result["success"]:
-            # Original server login successful
-            original_data = auth_result["data"].get("data", {})
-            original_user_data = original_data.get("user", {})
-            original_token = original_data.get("access_token") or original_data.get("token")
-            
-            # Find or create user in local database
-            user = db.query(User).filter(User.email == user_data.email).first()
-            if not user:
-                user = User(
-                    email=user_data.email,
-                    hashed_password="",
-                    hwid=user_data.hwid,
-                    is_active=True,
-                    created_at=datetime.utcnow()
-                )
-                db.add(user)
-                db.commit()
-                db.refresh(user)
-            else:
-                if user_data.hwid and user.hwid != user_data.hwid:
-                    user.hwid = user_data.hwid
-                user.last_login = datetime.utcnow()
-                db.commit()
-            
-            local_token = create_access_token(data={"sub": str(user.id)})
-            
+        # Validate input data
+        if not user_data.email or not user_data.email.strip():
             return {
-                "success": True,
-                "message": "Login successful (Original Server)",
-                "data": {
-                    "access_token": local_token,
-                    "token_type": "bearer",
-                    "original_token": original_token,
-                    "user": {
-                        "id": user.id,
-                        "email": user.email,
-                        "created_at": user.created_at.isoformat(),
-                        "last_login": user.last_login.isoformat() if user.last_login else None,
-                        "is_active": user.is_active,
-                        "original_user_data": original_user_data
-                    }
+                "success": False,
+                "message": "Email is required.",
+                "error_code": "EMAIL_REQUIRED"
+            }
+        
+        if not user_data.password or not user_data.password.strip():
+            return {
+                "success": False,
+                "message": "Password is required.",
+                "error_code": "PASSWORD_REQUIRED"
+            }
+        
+        # Find user by email in local database
+        user = db.query(User).filter(User.email == user_data.email.strip().lower()).first()
+        if not user:
+            return {
+                "success": False,
+                "message": "User not found. Please check your email.",
+                "error_code": "USER_NOT_FOUND"
+            }
+        
+        # Check if user is active
+        if not user.is_active:
+            return {
+                "success": False,
+                "message": "Account has been deactivated. Please contact support.",
+                "error_code": "ACCOUNT_DEACTIVATED"
+            }
+        
+        # Verify password
+        if not verify_password(user_data.password, user.hashed_password):
+            return {
+                "success": False,
+                "message": "Invalid password.",
+                "error_code": "INVALID_PASSWORD"
+            }
+        
+        # Check HWID if provided
+        if user_data.hwid:
+            if user.hwid is None:
+                # Lần đăng nhập đầu tiên, lưu HWID
+                user.hwid = user_data.hwid
+            elif user.hwid != user_data.hwid:
+                # HWID không khớp, từ chối đăng nhập
+                return {
+                    "success": False,
+                    "message": "Hardware ID không khớp. Vui lòng đăng nhập từ thiết bị đã đăng ký.",
+                    "error_code": "HWID_MISMATCH"
+                }
+        
+        # Update last login
+        user.last_login = datetime.utcnow()
+        db.commit()
+        
+        # Create access token
+        access_token = create_access_token(data={"sub": str(user.id)})
+        
+        return {
+            "success": True,
+            "message": "Login successful",
+            "data": {
+                "access_token": access_token,
+                "token_type": "bearer",
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "created_at": user.created_at.isoformat(),
+                    "last_login": user.last_login.isoformat() if user.last_login else None,
+                    "is_active": user.is_active
                 }
             }
+        }
+    
     except Exception as e:
-        print(f"Original server error: {e}")
-    
-    # Fallback to demo login if original server fails
-    print(f"🔄 Original server unavailable, trying demo login for: {user_data.email}")
-    
-    # Find user by email in local database
-    user = db.query(User).filter(User.email == user_data.email).first()
-    if not user:
+        print(f"Login error: {e}")
         return {
             "success": False,
-            "message": "Server không khả dụng và không tìm thấy user trong demo database. Vui lòng sử dụng demo@pmlogin.com hoặc tạo user test.",
-            "offline": True
+            "message": "Internal server error. Please try again later.",
+            "error_code": "INTERNAL_ERROR"
         }
-    
-    # Verify password (for demo user, password should be same as email or demo password)
-    if not verify_password(user_data.password, user.hashed_password):
-        return {
-            "success": False,
-            "message": "Server không khả dụng và mật khẩu demo không đúng.",
-            "offline": True
-        }
-    
-    # Check HWID if provided
-    if user_data.hwid:
-        if user.hwid and user.hwid != user_data.hwid:
-            # For demo, we'll update the HWID instead of rejecting
-            user.hwid = user_data.hwid
-        elif not user.hwid:
-            user.hwid = user_data.hwid
-    
-    # Update last login
-    user.last_login = datetime.utcnow()
-    db.commit()
-    
-    # Create local access token
-    local_token = create_access_token(data={"sub": str(user.id)})
-    
-    return {
-        "success": True,
-        "message": "Demo login successful (Server offline)",
-        "data": {
-            "access_token": local_token,
-            "token_type": "bearer",
-            "user": {
-                "id": user.id,
-                "email": user.email,
-                "created_at": user.created_at.isoformat(),
-                "last_login": user.last_login.isoformat() if user.last_login else None,
-                "is_active": user.is_active,
-                "isDemo": True,
-                "offline": True
-            }
-        }
-    }
 
 @app.post("/register", response_model=dict)
 async def register(user_data: UserCreate, db: Session = Depends(get_db)):
@@ -224,57 +208,6 @@ async def register(user_data: UserCreate, db: Session = Depends(get_db)):
                 "email": user.email,
                 "created_at": user.created_at.isoformat(),
                 "original_user_data": original_user_data
-            }
-        }
-    }
-
-@app.post("/login-demo", response_model=TokenResponse)
-async def login_demo(user_data: UserLogin, db: Session = Depends(get_db)):
-    """Demo login endpoint - authenticates with local database only"""
-    
-    # Find user by email in local database
-    user = db.query(User).filter(User.email == user_data.email).first()
-    if not user:
-        return {
-            "success": False,
-            "message": "User not found in local database. Please create test user first."
-        }
-    
-    # Verify password (for demo user, password should be same as email)
-    if not verify_password(user_data.password, user.hashed_password):
-        return {
-            "success": False,
-            "message": "Invalid password"
-        }
-    
-    # Check HWID if provided
-    if user_data.hwid:
-        if user.hwid and user.hwid != user_data.hwid:
-            # For demo, we'll update the HWID instead of rejecting
-            user.hwid = user_data.hwid
-        elif not user.hwid:
-            user.hwid = user_data.hwid
-    
-    # Update last login
-    user.last_login = datetime.utcnow()
-    db.commit()
-    
-    # Create local access token
-    local_token = create_access_token(data={"sub": str(user.id)})
-    
-    return {
-        "success": True,
-        "message": "Demo login successful",
-        "data": {
-            "access_token": local_token,
-            "token_type": "bearer",
-            "user": {
-                "id": user.id,
-                "email": user.email,
-                "created_at": user.created_at.isoformat(),
-                "last_login": user.last_login.isoformat() if user.last_login else None,
-                "is_active": user.is_active,
-                "isDemo": True  # Mark as demo user
             }
         }
     }
@@ -560,11 +493,11 @@ async def db_stats(
     """Get database statistics (matches db:stats IPC)"""
     try:
         # Import models to avoid name errors
-        from models import Tag, Group
+        from core.models import Tag, Group
         
         # Get counts from database
         proxy_count = db.query(Proxy).filter(Proxy.owner_id == current_user.id).count()
-        profile_count = db.query(Profile).filter(Profile.owner_id == current_user.id).count()
+        profile_count = db.query(SharedProfile).filter(SharedProfile.owner_id == current_user.id).count()
         tag_count = db.query(Tag).count()
         group_count = db.query(Group).count()
         
@@ -745,7 +678,7 @@ async def db_profile_get_all(
 ):
     """Get all profiles from database (matches db:profile:get-all IPC)"""
     try:
-        profiles = db.query(Profile).filter(Profile.owner_id == current_user.id).all()
+        profiles = db.query(SharedProfile).filter(SharedProfile.owner_id == current_user.id).all()
         return {"success": True, "data": profiles}
     except Exception as e:
         return {"success": False, "message": f"Error getting profiles from database: {str(e)}"}
@@ -757,10 +690,9 @@ async def db_profile_get_local(
 ):
     """Get local profiles from database (matches db:profile:get-local IPC)"""
     try:
-        profiles = db.query(Profile).filter(
-            Profile.owner_id == current_user.id,
-            Profile.shared_on_cloud == False
-        ).all()
+        # For SharedProfile, all profiles are considered "local" since they're stored locally
+        # but shared to cloud when needed
+        profiles = db.query(SharedProfile).filter(SharedProfile.owner_id == current_user.id).all()
         return {"success": True, "data": profiles}
     except Exception as e:
         return {"success": False, "message": f"Error getting local profiles from database: {str(e)}"}
@@ -772,81 +704,15 @@ async def db_profile_get_cloud(
 ):
     """Get cloud profiles from database (matches db:profile:get-cloud IPC)"""
     try:
-        profiles = db.query(Profile).filter(
-            Profile.owner_id == current_user.id,
-            Profile.shared_on_cloud == True
-        ).all()
+        # For SharedProfile, all profiles are considered "cloud" profiles
+        profiles = db.query(SharedProfile).filter(SharedProfile.owner_id == current_user.id).all()
         return {"success": True, "data": profiles}
+    except Exception as e:
+        return {"success": False, "message": f"Error getting cloud profiles from database: {str(e)}"}
     except Exception as e:
         return {"success": False, "message": f"Error getting cloud profiles from database: {str(e)}"}
 
 # Authentication Endpoints (matching pmlogin-app IPC structure)
-@app.post("/api/auth/login")
-async def auth_login(user_data: UserLogin, db: Session = Depends(get_db)):
-    """Login endpoint (matches auth:login IPC)"""
-    
-    # Find user by email
-    user = db.query(User).filter(User.email == user_data.email).first()
-    if not user or not verify_password(user_data.password, user.hashed_password):
-        return {
-            "success": False,
-            "message": "Invalid email or password"
-        }
-    
-    # Check HWID if provided
-    if user_data.hwid:
-        if user.hwid and user.hwid != user_data.hwid:
-            return {
-                "success": False,
-                "message": "Hardware ID mismatch"
-            }
-        
-        # Update HWID if not set
-        if not user.hwid:
-            user.hwid = user_data.hwid
-            db.commit()
-    
-    # Update last login
-    user.last_login = datetime.utcnow()
-    db.commit()
-    
-    # Create access token
-    access_token = create_access_token(data={"sub": str(user.id)})
-    
-    return {
-        "success": True,
-        "message": "Login successful",
-        "data": {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user": {
-                "id": user.id,
-                "email": user.email,
-                "created_at": user.created_at.isoformat(),
-                "last_login": user.last_login.isoformat() if user.last_login else None,
-                "is_active": user.is_active
-            }
-        }
-    }
-
-@app.post("/api/auth/login-demo")
-async def auth_login_demo(demo_data: dict):
-    """Demo login endpoint (matches auth:login-demo IPC)"""
-    try:
-        demo_user = demo_data.get("user", {})
-        
-        return {
-            "success": True,
-            "data": {
-                "user": demo_user,
-                "access_token": "demo-token-123"
-            }
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "message": f"Demo login error: {str(e)}"
-        }
 
 @app.post("/api/auth/logout")
 async def auth_logout():
