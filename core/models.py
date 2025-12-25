@@ -7,16 +7,16 @@ Base = declarative_base()
 
 # Association tables for many-to-many relationships
 profile_group_table = Table(
-    'profile_group',
+    'shared_profile_group',
     Base.metadata,
-    Column('profile_id', Integer, ForeignKey('profiles.id'), primary_key=True),
+    Column('shared_profile_id', Integer, ForeignKey('shared_profiles.id'), primary_key=True),
     Column('group_id', Integer, ForeignKey('groups.id'), primary_key=True)
 )
 
 profile_tag_table = Table(
-    'profile_tag', 
+    'shared_profile_tag', 
     Base.metadata,
-    Column('profile_id', Integer, ForeignKey('profiles.id'), primary_key=True),
+    Column('shared_profile_id', Integer, ForeignKey('shared_profiles.id'), primary_key=True),
     Column('tag_id', Integer, ForeignKey('tags.id'), primary_key=True)
 )
 
@@ -39,7 +39,8 @@ class User(Base):
     last_login = Column(DateTime, nullable=True)
     
     # Relationships
-    profiles = relationship("Profile", back_populates="owner")
+    profile_stats = relationship("ProfileStats", back_populates="owner", uselist=False)
+    shared_profiles = relationship("SharedProfile", back_populates="owner")
     proxies = relationship("Proxy", back_populates="owner")
 
 class Tag(Base):
@@ -50,7 +51,7 @@ class Tag(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
-    profiles = relationship("Profile", secondary=profile_tag_table, back_populates="tags")
+    shared_profiles = relationship("SharedProfile", secondary=profile_tag_table, back_populates="tags")
     proxies = relationship("Proxy", secondary=proxy_tag_table, back_populates="tags")
 
 class Group(Base):
@@ -61,29 +62,46 @@ class Group(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
-    profiles = relationship("Profile", secondary=profile_group_table, back_populates="groups")
+    shared_profiles = relationship("SharedProfile", secondary=profile_group_table, back_populates="groups")
 
-class Profile(Base):
-    __tablename__ = "profiles"
+# Bảng thống kê profile của client (không lưu chi tiết profile)
+class ProfileStats(Base):
+    __tablename__ = "profile_stats"
     
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    total_profiles = Column(Integer, default=0)
+    shared_profiles = Column(Integer, default=0)  # Số profile được share lên cloud
+    last_sync_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    owner = relationship("User", back_populates="profile_stats")
+
+# Bảng lưu profile được share lên cloud (chỉ khi client chọn shared_on_cloud=True)
+class SharedProfile(Base):
+    __tablename__ = "shared_profiles"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    client_profile_id = Column(String, nullable=False)  # ID của profile trên client
     name = Column(String, nullable=False)
     platform = Column(String, nullable=True)
     note = Column(Text, nullable=True)
-    proxy = Column(String, nullable=True)  # JSON string or proxy reference
+    proxy_info = Column(Text, nullable=True)  # JSON string chứa thông tin proxy
     status = Column(String, default="Ready")
-    shared_on_cloud = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     last_started_at = Column(DateTime, nullable=True)
+    sync_version = Column(Integer, default=1)  # Version để sync
     
     # Foreign keys
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     
     # Relationships
-    owner = relationship("User", back_populates="profiles")
-    groups = relationship("Group", secondary=profile_group_table, back_populates="profiles")
-    tags = relationship("Tag", secondary=profile_tag_table, back_populates="profiles")
+    owner = relationship("User", back_populates="shared_profiles")
+    groups = relationship("Group", secondary=profile_group_table, back_populates="shared_profiles")
+    tags = relationship("Tag", secondary=profile_tag_table, back_populates="shared_profiles")
 
 class Proxy(Base):
     __tablename__ = "proxies"

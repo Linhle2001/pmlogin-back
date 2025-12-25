@@ -8,7 +8,7 @@ import os
 from dotenv import load_dotenv
 
 from core.database import get_db, init_db
-from core.models import User, Proxy, Profile, Tag, Group
+from core.models import User, Proxy, SharedProfile, ProfileStats, Tag, Group
 from core.schemas import (
     UserCreate, UserLogin, UserResponse, TokenResponse, ChangePassword, 
     ProxyCreate, ProxyUpdate, ProxyTest, ProxyImport, ProxyResponse,
@@ -41,9 +41,9 @@ app.add_middleware(
 # Security
 security = HTTPBearer()
 
-# Services
-proxy_service = ProxyService()
-profile_service = ProfileService()
+# Services will be initialized per request
+# proxy_service = ProxyService()
+# profile_service = ProfileService()
 
 # Initialize database on startup
 @app.on_event("startup")
